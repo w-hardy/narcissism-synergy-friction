@@ -1,0 +1,1 @@
+# narcissism-synergy-friction
