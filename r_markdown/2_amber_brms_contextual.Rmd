@@ -1,0 +1,821 @@
+---
+title: "Amber & Brom MSc data combined"
+author: "Will A. S. Hardy"
+date: "08/11/2020"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r, setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, cache = TRUE)
+opts <- options(knitr.kable.NA = "")
+
+##### Packages #####
+library(brms) # for the analysis
+library(haven) # to load the SPSS .sav file
+library(tidyverse) # needed for data manipulation.
+library(RColorBrewer) # needed for some extra colours in one of the graphs
+library(ggmcmc)
+library(ggthemes)
+library(ggridges)
+library(RcppEigen)
+library(knitr)
+
+options(mc.cores = parallel::detectCores() - 1)
+
+##### Data #####
+amber1 <- read_rds("../data/amber.rds")
+
+small_team <- 
+  amber1 %>% 
+  group_by(team) %>% 
+  count() %>% 
+  arrange(n) %>% 
+  filter(n < 5) %>% 
+  .$team
+
+amber <- 
+  amber1 %>% 
+  filter(!team %in% small_team) %>% 
+  select(coder, age, sex, sport, team, ggc_mean, starts_with("igc_"), npi_mean,
+         cni_mean)
+
+amber_centered <- # Grand mean centering
+  amber %>%
+  left_join(amber %>% group_by(team) %>%
+              summarise(team_npi = mean(npi_mean, na.rm = TRUE), # create team means
+                        team_cni = mean(cni_mean, na.rm = TRUE),
+                        sd_npi = sd(npi_mean, na.rm = TRUE),
+                        sd_cni = sd(cni_mean, na.rm = TRUE),
+                        team_igc_proc = mean(igc_proc, na.rm = TRUE),
+                        team_igc_rel = mean(igc_rel, na.rm = TRUE),
+                        team_igc_task = mean(igc_task, na.rm = TRUE)),
+            by = "team") %>% 
+  mutate(across(where(is.numeric), ~scale(x = ., scale = FALSE)))
+
+
+#### Functions ####
+# To colour code the extremes, we need to write a small function that calculates the regression lines and adds a column indicating which clusters have the most extreme.
+f1 <- function(data, x, y, grouping, n.highest = 3, n.lowest = 3){
+  groupinglevel <- data[,grouping]
+  res           <- data.frame(coef = rep(NA, length(unique(groupinglevel))), group = unique(groupinglevel))
+  names(res)    <- c("coef", grouping)
+  groups <- as.character(unlist(unique(c(groupinglevel))))
+  for(i in 1:length(unique(groupinglevel))){
+    data2    <- as.data.frame(data[data[,grouping] == groups[i],])
+    res[i,1] <- as.numeric(lm(data2[, y] ~ data2[, x])$coefficients[2])
+  }
+  top    <- res %>% top_n(n.highest, coef)
+  bottom <- res %>% top_n(-n.lowest, coef)
+  res <- res %>% 
+    mutate(high_and_low = ifelse(coef %in% top$coef, "top",  
+                                 ifelse(coef %in% bottom$coef, "bottom", "none")))
+  data3  <- left_join(data, res)
+  return(data3)
+}
+
+
+modelParams <- function(model){
+  posterior_summary(model) %>% 
+  as_tibble(rownames = NA) %>% 
+  rownames_to_column(var = "Parameter") %>% 
+  filter(!str_detect(Parameter, "r_team"),
+         !str_detect(Parameter, "L_"),
+         !str_detect(Parameter, "z_"))
+}
+
+bayesEstimate <- function(.){
+  require(papaja)
+  paste0(printnum(.$Estimate), "[", printnum(.$Q2.5), ",", printnum(.$Q97.5), "]")
+}
+```
+
+
+## Team level summary
+
+```{r, team-summary}
+amber_centered %>% 
+  group_by(team) %>% 
+  summarise(across(.cols = where(is.numeric), .fns = ~mean(.x, na.rm = TRUE))) %>% 
+  kable(digits = 2)
+```
+
+
+## Group goal commitment {.tabset}
+### Plotting the data {.tabset}
+#### Scatter
+
+```{r, npi-ggc-mean-scatter}
+## scatter
+ggplot(data  = amber,
+       aes(x = npi_mean,
+           y = ggc_mean))+
+  geom_point(size = 1.2,
+             alpha = .8,
+             position = "jitter")+# to add some random noise for plotting purposes
+  theme_minimal()+
+  labs(title = "NPI narcissism vs. Group conflict")
+```
+
+
+#### Scatter with regression line
+
+```{r, npi-ggc-mean-scatter-reg-line}
+ggplot(data  = amber,
+       aes(x = npi_mean,
+           y = ggc_mean))+
+  geom_point(size = 1.2,
+             alpha = .8,
+             position = "jitter")+# to add some random noise for plotting purposes
+  geom_smooth(method = lm,
+              se     = FALSE,
+              col    = "black",
+              size   = .5,
+              alpha  = .8)+ # to add regression line
+  theme_minimal()+
+  labs(title = "NPI narcissism vs. Group conflict",
+       subtitle = "add regression line")
+```
+
+
+#### Scatter with regression line by sex
+
+```{r, npi-ggc-mean-scatter-sex-reg-line}
+ggplot(data  = amber,
+       aes(x = npi_mean,
+           y = ggc_mean,
+           col = sex,
+           group = sex))+
+  geom_point(size = 1.2,
+             alpha = .8,
+             position = "jitter")+# to add some random noise for plotting purposes
+  geom_smooth(method = lm,
+              # se     = FALSE,
+              # col    = "black",
+              size   = .5,
+              alpha  = .8)+ # to add regression line
+  theme_minimal()+
+  labs(title = "NPI narcissism vs. Group conflict",
+       subtitle = "add regression line")
+```
+
+
+#### Scatter with regression lines coloured by team
+
+##### NPI
+
+```{r, npi-ggc-mean-scatter-team-reg-line}
+ggplot(data  = amber,
+       aes(x = npi_mean,
+           y = ggc_mean,
+           col = as.numeric(team),
+           group = team)) +
+  geom_point(size = 1.2,
+             alpha = .8,
+             position = "jitter") +# to add some random noise for plotting purposes
+  theme_minimal() +
+  theme(legend.position = "none") +
+  scale_color_gradientn(colours = rainbow(59)) +
+  geom_smooth(method = lm,
+              se     = FALSE,
+              size   = .5,
+              alpha  = .8) + # to add regression line
+  labs(title = "NPI narcissism vs. Group goal commitment",
+       subtitle = "add colours and regression lines for different teams")
+```
+
+
+##### CNI
+
+```{r, cni-ggc-mean-scatter-team-reg-line}
+ggplot(data  = amber,
+       aes(x = cni_mean,
+           y = ggc_mean,
+           col = as.numeric(team),
+           group = team)) +
+  geom_point(size = 1.2,
+             alpha = .8,
+             position = "jitter") +# to add some random noise for plotting purposes
+  theme_minimal() +
+  theme(legend.position = "none") +
+  scale_color_gradientn(colours = rainbow(59)) +
+  geom_smooth(method = lm,
+              se     = FALSE,
+              size   = .5,
+              alpha  = .8) + # to add regression line
+  labs(title = "CNI narcissism vs. Group goal commitment",
+       subtitle = "add colours and regression lines for different teams")
+```
+
+
+### Analysis 1 {.tabset}
+#### Intercept only model
+
+```{r, ggc-int-model, include=FALSE}
+ggc_interceptonlymodel <- 
+  brm(ggc_mean ~ 1 + (1|team),  
+      data = amber_centered, 
+      warmup = 1000, iter = 3000, seed = 123) 
+
+ggc_interceptonlyparams <- modelParams(ggc_interceptonlymodel)
+
+# Calculating ICC
+hyp <- "sd_team__Intercept^2 / (sd_team__Intercept^2 + sigma^2) = 0"
+hypothesis(ggc_interceptonlymodel, hyp, class = NULL)
+icc_test <- print(hypothesis(ggc_interceptonlymodel, hyp, class = NULL))
+icc_est <- paste0(icc_test$hypothesis$Estimate, " [", icc_test$hypothesis$CI.Lower, ",",
+       icc_test$hypothesis$CI.Upper, "]")
+```
+
+
+```{r, ggc-int-params}
+ggc_interceptonlyparams %>% 
+  kable(digits = 2)
+```
+
+* Posterior mean of residual variance at team level = `r ggc_interceptonlyparams[2,2]^2`
+* Posterior mean of residual variance at individual level = `r ggc_interceptonlyparams[3,2]^2`
+* ICC: $\rho$ = `r icc_est`
+
+
+#### First level predictors
+
+```{r, ggc-l1-model, interval=FALSE}
+ggc_model1 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + (1|team),  
+              data = amber_centered, 
+              warmup = 1000, iter = 3000, seed = 123) 
+
+ggc_model1params <- modelParams(ggc_model1)
+```
+
+
+```{r, ggc-l1-params}
+broom.mixed::tidy(ggc_model1) %>% 
+  kable()
+```
+
+* NS npi_mean
+* Positive effect for CNI mean
+* NS interaction
+* Residual variance on the team level : $\sigma_{u0}$ = `r ggc_model1params[6,2]^2`)
+
+
+
+#### First level predictors with random slopes
+
+```{r, ggc-l1-rand-slopes-model, include=FALSE}
+ggc_model2 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + 
+                    (1 + sex + npi_mean*cni_mean |team),
+              data = amber_centered, 
+              warmup = 1000, iter = 3000, seed = 123)
+
+ggc_model2params <- modelParams(ggc_model2)
+```
+
+
+```{r ggc-l1-rand-slopes-params}
+broom.mixed::tidy(ggc_model2) %>% 
+  kable()
+```
+
+* NPI mean NS, variance of slopes = `r ggc_model2params[8,2]^2`
+* CNI mean positive, variance of slopes = `r ggc_model2params[9,2]^2`
+* Interaction NS
+* Residual variance on the team level : $\sigma_{u0}$ = `r ggc_model2params[6,2]^2`
+
+
+#### First and second level predictors with random slopes
+
+```{r, ggc-l1and2-rand-slopes-model, include=FALSE}
+ggc_model3 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + 
+                team_npi * team_cni + 
+                (1 + sex + npi_mean*cni_mean|team),
+              data = amber_centered, 
+              warmup = 1000, iter = 3000, seed = 123)
+
+ggc_model3params <- modelParams(ggc_model3)
+```
+
+
+```{r, ggc-l1and2-rand-slopes-params}
+broom.mixed::tidy(ggc_model3) %>% 
+  kable()
+```
+
+* Positive effect for sexMale, variance of slopes = `r ggc_model3params[10,2]^2`
+* NPI mean NS, variance of slopes = `r ggc_model3params[11,2]^2`
+* CNI mean NA, variance of slopes = `r ggc_model3params[12,2]^2`
+* Team NPI negative
+* Team CNI NS
+* L1 Interaction NS
+* L2 Interaction NS
+* Residual variance on the team level : $\sigma_{u0}$ = `r ggc_model3params[9,2]^2` 
+  
+
+#### First and second level predictors with random slopes and cross-level interaction
+
+```{r, ggc-l1and2-rand-slopes-xlevl-model, include=FALSE}
+ggc_model4 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean*team_npi*team_cni +
+                    (1 + sex + npi_mean*cni_mean|team),
+                  data = amber_centered, 
+                  warmup = 3000, iter = 8000,
+                  seed = 123, control = list(adapt_delta = 0.99))
+
+ggc_model4params <- modelParams(ggc_model4) 
+```
+
+
+```{r, ggc-l1and2-rand-slopes-xlevl-convergence, dependson="ggc-l1and2-rand-slopes-xlevl-model"}
+plot(ggc_model4,N = 1, ask = FALSE)
+
+```
+
+
+```{r, ggc-l1and2-rand-slopes-xlevl-params, dependson="ggc-l1and2-rand-slopes-xlevl-model"}
+broom.mixed::tidy(ggc_model4) %>% 
+  kable()
+
+conditional_effects(ggc_model4)
+```
+
+* Positive effect for sexMale, variance of slopes = `r ggc_model3params[10,2]^2`
+* NPI mean NS, variance of slopes = `r ggc_model3params[11,2]^2`
+* CNI mean NS, variance of slopes = `r ggc_model3params[12,2]^2`
+* Team NPI negative
+* Team CNI NS
+* L1 Interaction NS
+* L2 Interaction NS
+* Residual variance on the team level : $\sigma_{u0}$ = `r ggc_model3params[9,2]^2` 
+
+
+```{r, ggc-l1and2-rand-slopes-xlevl-int-plot, dependson="ggc-l1and2-rand-slopes-xlevl-model"}
+pred_data <- function(data, variable){
+  
+  variable <- enquo(variable)
+  
+  data %>%
+    summarise(low = mean(!!variable, na.rm = TRUE) - 
+                sd(!!variable, na.rm = TRUE),
+              high = mean(!!variable, na.rm = TRUE) +
+                sd(!!variable, na.rm = TRUE)) %>% 
+    unlist()
+  
+}
+
+
+sex <- factor(c("Female", "Male"), levels = c("Female", "Male"))
+npi_mean <- pred_data(amber_centered, npi_mean)
+cni_mean <- pred_data(amber_centered, cni_mean)
+team_npi <- pred_data(amber_centered, team_npi)
+team_cni <- pred_data(amber_centered, team_cni)
+team <- unique(amber_centered$team)
+
+new_data <- 
+  map_dfr(.x = 1:length(team), 
+          .f = ~tibble(sex = c(rep(sex[1], 16), rep(sex[2], 16)),
+                       npi_mean = 
+                         rep(c(rep(npi_mean[1], 8), rep(npi_mean[2], 8)), 2),
+                       cni_mean = 
+                         rep(c(rep(cni_mean[1], 4), rep(cni_mean[2], 4)), 4),
+                       team_npi = 
+                         rep(c(rep(team_npi[1], 2), rep(team_npi[2], 2)), 8),
+                       team_cni = rep(team_cni, 16),
+                       team = rep(team[.x], 32))) %>% 
+  mutate(sex = case_when(sex == 1 ~ "Female",
+                         sex == 2 ~ "Male"))
+
+df <- tidybayes::predicted_draws(ggc_model4, newdata = new_data, n = 1000) %>% 
+  group_by(npi_mean, cni_mean, team_npi, team_cni) %>% 
+  summarise(npi_mean = npi_mean,
+            cni_mean = cni_mean,
+            team_npi = team_npi,
+            team_cni = team_cni,
+            GGC = mean(.prediction),
+            sd_pred = sd(.prediction),
+            .groups = "drop") 
+
+df %>%
+  mutate(cni_mean = 
+           case_when(cni_mean == max(cni_mean) ~ 
+                       paste("High", round(max(cni_mean), 3)),
+                     cni_mean == min(cni_mean) ~ 
+                       paste("Low", round(min(cni_mean), 3))),
+         team_npi = 
+           case_when(team_npi == max(team_npi) ~ 
+                       paste("High team NPI", round(max(team_npi), 3)),
+                     team_npi == min(team_npi) ~ 
+                       paste("Low team NPI", round(min(team_npi), 3))),
+         team_cni = 
+           case_when(team_cni == max(team_cni) ~ 
+                       paste("High team CNI", round(max(team_cni), 3)),
+                     team_cni == min(team_cni) ~ 
+                       paste("Low team CNI", round(min(team_cni), 3)))) %>%
+  ggplot(aes(x = npi_mean, y = GGC, colour = cni_mean)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~team_npi + team_cni) +
+  labs(caption = "Variables are grand mean centred,\n therefore scores of 0 represent the mean individual or team. \nHigh and low values are ±1 SD.")
+
+```
+
+
+
+```{r, ggc-team-npi-plot}
+amber_centered %>% 
+  ggplot(aes(x = npi_mean, y = ggc_mean, 
+             col = (team_npi), group = team)) +
+  viridis::scale_color_viridis() +
+  geom_point(size = .7, alpha = .8, position = "jitter") +
+  geom_smooth(method = "lm",
+              se = FALSE, size = .8, alpha = .8) + 
+  theme_minimal() +
+  labs(title = "Linear relationship for teams with different levels of team NPI",
+       subtitle = "The linear relationship is not the same for all teams",
+       col = "Team NPI")
+```
+
+```{r, ggc-team-npi-plot-bayes}
+simple_npi_model_1 <- 
+  brm(ggc_mean ~ 1 + npi_mean + (1 + npi_mean | team),
+      data = amber_centered,
+      warmup = 1000, iter = 5000, chains = 2,
+      seed = 123, control = list(adapt_delta = .96),
+      save_all_pars = TRUE, cores = 2)
+
+posterior_simple_npi_model_1 <- 
+  posterior_samples(simple_npi_model_1, pars = "npi_mean")[,-c(1:3)] %>%
+  t() %>% 
+  as_tibble()
+
+team_npi_scores <- 
+  amber_centered %>% 
+  group_by(team) %>% 
+  summarise(team_npi_2 = mean(team_npi))
+
+posterior_simple_npi_model_1_long <- 
+  bind_cols(team_npi_scores, posterior_simple_npi_model_1) %>% 
+  pivot_longer(cols = colnames(posterior_simple_npi_model_1), 
+               names_to = "Team") %>% 
+  group_by(team) %>% 
+  mutate(mean_per_team = mean(value)) %>% 
+  ungroup
+
+posterior_simple_npi_model_1_long %>% 
+  ggplot() +
+  ggridges::geom_density_ridges(aes(x = value, 
+                                    y = reorder(as.factor(team), mean_per_team),
+                                    height = ..density..,
+                                    fill = as.factor(round(team_npi_2, 2))),
+                                scale = 3, alpha = .6) +
+  scale_x_continuous(limits = c(-1.5,1.5)) +
+  geom_point(data = summarise(group_by(posterior_simple_npi_model_1_long, team),
+                              mean = mean(mean_per_team)), 
+             aes(x = mean, y = as.factor(team)), size = 1, col = "red") +
+  viridis::scale_fill_viridis(discrete = TRUE) +
+  geom_vline(xintercept = 0, col = "red") +
+  labs(fill = "Team NPI", y = "Teams", 
+       title = expression(paste("Team Level Error of Regression Coefficient of NPI on GGC (", u["2j"],")")),
+       subtitle = expression(paste("posterior distribution of team level error of regression coefficient (", u["2j"],") per team with the means in red")), 
+       caption  = expression(paste("Regression formula: GGC = ", gamma["00"], "+", gamma["20"],"*", npi["ij"], "+", u["2j"], "*", npi["ij"],"+", e["ij"] )))+
+  annotate(geom     = "text", 
+           x        = 0, 
+           y        = 1.5, 
+           label    = "Grand mean", 
+           col      = "red", 
+           family   = theme_get()$text[["family"]], 
+           size     = theme_get()$text[["size"]]/3, 
+           fontface = "italic")+
+  theme_tufte()
+  
+```
+
+
+```{r}
+distance95 <- 
+  posterior_simple_npi_model_1_long %>% 
+  group_by(team) %>% 
+  summarise(l95 = quantile(value, probs = .025),
+            u95 = quantile(value, probs = .975),
+            distance = u95-l95,
+            mean_estimate = mean(value)) %>% 
+  bind_cols(team_npi_scores) %>% 
+  group_by(team_npi_2) %>% 
+  summarise(mean = mean(distance),
+            mean_estimate = mean(mean_estimate),
+            lower = mean(l95),
+            upper = mean(u95),
+            mean_cci = paste("[",sprintf("%.4f",round(lower,4)), ":", sprintf("%.4f",round(upper,4)), "]")) %>% 
+  mutate(quadratic = team_npi_2^2)
+
+model1 <- lm(mean ~ team_npi_2, data = distance95)
+model2 <- lm(mean ~ team_npi_2 + quadratic, data = distance95)
+
+summary(model1)
+summary(model2) # Quadratic term not significant
+
+dat <- data.frame(team_npi_2 = c(seq(-.18, .22, .01)),
+                  quadratic = seq(-.18, .22, .01)^2)
+
+dat$yhat <- predict(model1, dat)
+
+ggplot() +
+  geom_line(data = dat, 
+            aes(x = team_npi_2, y = yhat), lty = "dotted", size = 1) +
+  geom_point(data = distance95,
+             aes(x = team_npi_2, y = mean, col = mean_estimate)) +
+  geom_text(data = distance95,
+            aes(x = team_npi_2, y = mean, label = mean_cci),
+                hjust    = .5, 
+                vjust    = -.15, 
+                family   = theme_get()$text[["family"]], 
+                size     = 2, 
+                fontface = "italic") +
+  annotate(geom = "text", x = .1, y = 2.85,
+           label = "CCI distance = 2.37 - 1.51*team NPI",
+           colour   = "black",  
+           family   = theme_get()$text[["family"]], 
+           size     = 2, 
+           fontface = "italic") +
+  viridis :: scale_color_viridis(discrete = F, direction = -1) +
+  labs(y = "95% CCI distance",
+       title = expression(paste("Mean CCI Distance of Posterior of (", u["2j"], ") for Different levels of team NPI")),
+       subtitle = "In brackets the actual CCIs and in colour the parameter estimate",
+       col = expression(paste("estimate ", u["2j"]))) +
+  theme_tufte()
+```
+
+
+
+#### Model comparison
+
+```{r, ggc-model-comparison, cache=FALSE}
+bind_rows(broom.mixed::tidy(ggc_model1),
+          broom.mixed::tidy(ggc_model2),
+          broom.mixed::tidy(ggc_model3),
+          broom.mixed::tidy(ggc_model4),.id = "model") %>% 
+  mutate(est_print = paste(paste0(round(estimate, 2), "[", round(conf.low, 2),
+                                  ",", round(conf.high, 2), "]"))) %>% 
+  pivot_wider(values_from = est_print, names_from = model,
+              id_cols = term) %>% 
+  kable(digits = 2)
+```
+
+
+## IGC multivariate {.tabset}
+
+### Plotting
+
+```{r, eval=TRUE}
+plotSlopes <- function(data, resp, efflist, group) {
+  require(ggplot2)
+  require(purrr)
+  y <- enquo(resp)
+  group <- enquo(group)
+  ngroups <- data %>% 
+    select(!!group) %>% 
+    unique() %>% 
+    nrow()
+
+  map(efflist, function(x)
+    ggplot(data, aes(!!sym(x), !!y, col = as.numeric(!!group), 
+                     group = !!group)) +
+    geom_point(size = 1.2,
+               alpha = .8,
+               position = "jitter") + # to add some random noise for plotting purposes
+    theme_minimal() +
+    theme(legend.position = "none") +
+    scale_color_gradientn(colours = rainbow(n = ngroups)) +
+    geom_smooth(method = lm,
+                se     = FALSE,
+                size   = .5,
+                alpha  = .8) + # to add regression line
+    ylab(NULL)
+  )
+}
+```
+
+
+#### NPI
+
+```{r}
+plotSlopes(amber, resp = npi_mean, 
+           efflist = c("igc_task", "igc_rel", "igc_proc"),
+           group = team) %>% 
+  gridExtra::grid.arrange(grobs = ., left = "npi_mean")
+```
+
+
+#### CNI
+
+```{r}
+plotSlopes(amber, resp = cni_mean, 
+           efflist = c("igc_task", "igc_rel", "igc_proc"),
+           group = team) %>% 
+  gridExtra::grid.arrange(grobs = ., left = "cni_mean")
+```
+
+
+
+### Analysis {.tabset}
+#### Intercept only model
+
+#### First and second level predictors with random slopes and cross-level interaction
+
+```{r, igc-l1and2-rand-slopes-xlevl-model, include=FALSE}
+ggc_model4 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + sex + npi_mean*cni_mean*team_npi*team_cni +
+                    (1 + sex + npi_mean*cni_mean|p|team),
+                  data = amber_centered, 
+                  warmup = 3000, iter = 8000,
+                  seed = 123, control = list(adapt_delta = 0.99))
+
+ggc_model4params <- modelParams(ggc_model4) 
+```
+
+
+```{r, igc-l1and2-rand-slopes-xlevl-params, dependson="ggc-l1and2-rand-slopes-xlevl-model"}
+broom.mixed::tidy(ggc_model4) %>% 
+  kable()
+
+conditional_effects(ggc_model4)
+```
+
+--- 
+
+try `capture.output()`
+
+```{r, include=FALSE, eval=FALSE}
+igc_interceptonlymodel <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + (1|p|team),  
+                          data = amber_centered, 
+                          warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+# x <- sjstats::tidy_stan(interceptonlymodel, prob = .95)
+# 
+# bind_rows(x$fixed.conditional..igcproc,
+# x$fixed.conditional..igcrel,
+# x$fixed.sigma..igcrel,
+# x$fixed.conditional..igctask,
+# x$fixed.sigma..igctask
+# ) %>% 
+#   pivot_wider(id_cols = Cleaned_Parameter, names_from = Response, values_from = c(Estimate, Std.Error, `HDI(95%)`))
+```
+
+
+```{r, eval=FALSE}
+igc_interceptonlyparams <- modelParams(igc_interceptonlymodel)
+
+igc_interceptonlyparams %>% 
+  kable(digits = 2)
+```
+
+
+
+#### First level predictors
+
+```{r, include = FALSE, eval=FALSE}
+igc_model1 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean * cni_mean + (1|p|team), 
+              data = amber_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+igc_model1params <- modelParams(igc_model1)
+```
+
+
+```{r, eval=FALSE}
+igc_model1params %>% 
+  kable(digits = 2)
+```
+
+
+#### First and second level predictors
+
+```{r, include = FALSE, eval=FALSE}
+igc_model2 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean * cni_mean + team_npi + team_cni + (1|p|team), 
+              data = amber_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+igc_model2params <- modelParams(igc_model2)
+```
+
+
+```{r, eval=FALSE}
+igc_model2params %>% 
+  kable(digits = 2)
+```
+
+
+
+#### First and second level predictors with L1 random slopes
+
+```{r, eval=FALSE}
+igc_model3 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean * cni_mean + team_npi + team_cni + (1 + 
+                sex + npi_mean * cni_mean|p|team), 
+              data = amber_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+igc_model3params <- modelParams(igc_model3)
+```
+
+
+```{r, eval=FALSE}
+igc_model3params %>% 
+  kable(digits = 2)
+
+conditional_effects(igc_model3)
+```
+
+
+
+
+#### First and level predictors with L1 interaction and L2 random slopes
+
+```{r, eval=FALSE}
+igc_model4 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean * cni_mean + team_npi + team_cni + (1 + 
+                sex + npi_mean * cni_mean + team_npi + team_cni|p|team), 
+              data = amber_centered, 
+              warmup = 1000, iter = 3000, seed = 123,
+              control = list(adapt_delta = 0.99), save_all_pars = TRUE) 
+
+igc_model4params <- modelParams(igc_model4)
+```
+
+
+```{r, eval=FALSE}
+igc_model4params %>% 
+  kable(digits = 2)
+
+conditional_effects(igc_model4)
+```
+
+
+#### First and level predictors with L2 interaction and L2 random slopes
+
+```{r, eval=FALSE}
+igc_model5 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean*cni_mean + team_npi*team_cni + 
+                (1 + sex + npi_mean*cni_mean + team_npi*team_cni|p|team), 
+              data = amber_centered, 
+              warmup = 1000, iter = 3000, seed = 123,
+              control = list(adapt_delta = 0.99), save_all_pars = TRUE) 
+
+igc_model5params <- modelParams(igc_model5)
+```
+
+
+```{r, eval=FALSE}
+igc_model5params %>% 
+  kable(digits = 2)
+
+conditional_effects(igc_model5)
+```
+
+#### First and level predictors with L2 interaction and L2 random slopes and partial cross level interaction
+
+```{r, eval=FALSE}
+igc_model6 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean*cni_mean:team_npi*team_cni + 
+                (1 + sex + npi_mean*cni_mean + team_npi*team_cni|p|team), 
+              data = amber_centered, 
+              warmup = 1000, iter = 3000, seed = 123,
+              control = list(adapt_delta = 0.99), save_all_pars = TRUE) 
+
+igc_model6params <- modelParams(igc_model6)
+```
+
+
+```{r, eval=FALSE}
+igc_model6params %>% 
+  kable(digits = 2)
+
+conditional_effects(igc_model6)
+```
+
+
+#### First and level predictors with L2 interaction and L2 random slopes and full cross level interaction
+
+```{r, eval=FALSE}
+igc_model7 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean*cni_mean*team_npi*team_cni + 
+                (1 + sex + npi_mean*cni_mean + team_npi*team_cni|p|team), 
+              data = amber_centered, 
+              warmup = 1000, iter = 3000, seed = 123,
+              control = list(adapt_delta = 0.99), save_all_pars = TRUE) 
+
+igc_model7params <- modelParams(igc_model7)
+```
+
+
+```{r, eval=FALSE}
+igc_model7params %>% 
+  kable(digits = 2)
+
+conditional_effects(igc_model7)
+```
+
+

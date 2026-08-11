@@ -1,0 +1,1070 @@
+---
+title: "Amber & Brom MSc data combined"
+author: "Will A. S. Hardy"
+date: "08/11/2020"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r, setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, cache = TRUE)
+opts <- options(knitr.kable.NA = "")
+
+##### Packages #####
+library(brms) # for the analysis
+library(haven) # to load the SPSS .sav file
+library(tidyverse) # needed for data manipulation.
+library(RColorBrewer) # needed for some extra colours in one of the graphs
+library(ggmcmc)
+library(ggthemes)
+library(ggridges)
+library(RcppEigen)
+library(knitr)
+
+options(mc.cores = parallel::detectCores() - 1)
+
+##### Data #####
+amber_brom1 <- read_rds("../data/amber_brom_msc_merged.rds")
+
+small_team <- 
+  amber_brom1 %>% 
+  group_by(team) %>% 
+  count() %>% 
+  arrange(n) %>% 
+  filter(n < 5) %>% 
+  .$team
+
+amber_brom <- 
+  amber_brom1 %>% 
+  filter(!team %in% small_team)
+
+amber_brom_centered <-
+  amber_brom %>%
+  left_join(amber_brom %>% group_by(team) %>%
+              summarise(team_npi = mean(npi_mean, na.rm = TRUE), # create team means
+                        team_cni = mean(cni_mean, na.rm = TRUE),
+                        sd_npi = sd(npi_mean, na.rm = TRUE),
+                        sd_cni = sd(cni_mean, na.rm = TRUE)),
+            by = "team") %>% 
+  mutate(npi_mean = npi_mean - team_npi, # centre individual IV scores on team mean
+         cni_mean = cni_mean  - team_cni,
+         team_npi = team_npi - mean(team_npi, na.rm = TRUE),
+         team_cni = team_cni - mean(team_cni, na.rm = TRUE))
+
+
+#### Functions ####
+# To colour code the extremes, we need to write a small function that calculates the regression lines and adds a column indicating which clusters have the most extreme.
+f1 <- function(data, x, y, grouping, n.highest = 3, n.lowest = 3){
+  groupinglevel <- data[,grouping]
+  res           <- data.frame(coef = rep(NA, length(unique(groupinglevel))), group = unique(groupinglevel))
+  names(res)    <- c("coef", grouping)
+  for(i in 1:length(unique(groupinglevel))){
+    data2    <- as.data.frame(data[data[,grouping] == i,])
+    res[i,1] <- as.numeric(lm(data2[, y] ~ data2[, x])$coefficients[2])
+  }
+  top    <- res %>% top_n(n.highest, coef)
+  bottom <- res %>% top_n(-n.lowest, coef)
+  res    <- res %>% mutate(high_and_low = ifelse(coef %in% top$coef, "top",  ifelse(coef %in% bottom$coef, "bottom", "none")))
+  data3  <- left_join(data, res)
+  return(data3)
+}
+
+modelParams <- function(model){
+  posterior_summary(model) %>% 
+  as_tibble(rownames = NA) %>% 
+  rownames_to_column(var = "Parameter") %>% 
+  filter(!str_detect(Parameter, "r_team"),
+         !str_detect(Parameter, "L_"),
+         !str_detect(Parameter, "z_"))
+}
+
+bayesEstimate <- function(.){
+  require(papaja)
+  paste0(printnum(.$Estimate), "[", printnum(.$Q2.5), ",", printnum(.$Q97.5), "]")
+}
+```
+
+
+## Team level summary
+
+```{r}
+amber_brom_centered %>% 
+  group_by(team) %>% 
+  summarise(across(.cols = where(is.numeric), .fns = ~mean(.x, na.rm = TRUE))) %>% 
+  kable(digits = 2)
+```
+
+
+## Group goal commitment {.tabset}
+### Plotting the data {.tabset}
+#### Scatter
+
+```{r}
+## scatter
+ggplot(data  = amber_brom,
+       aes(x = npi_mean,
+           y = ggc_mean))+
+  geom_point(size = 1.2,
+             alpha = .8,
+             position = "jitter")+# to add some random noise for plotting purposes
+  theme_minimal()+
+  labs(title = "NPI narcissism vs. Group conflict")
+```
+
+
+#### Scatter with regression line
+
+```{r}
+ggplot(data  = amber_brom,
+       aes(x = npi_mean,
+           y = ggc_mean))+
+  geom_point(size = 1.2,
+             alpha = .8,
+             position = "jitter")+# to add some random noise for plotting purposes
+  geom_smooth(method = lm,
+              se     = FALSE,
+              col    = "black",
+              size   = .5,
+              alpha  = .8)+ # to add regression line
+  theme_minimal()+
+  labs(title = "NPI narcissism vs. Group conflict",
+       subtitle = "add regression line")
+```
+
+
+#### Scatter with regression line by sex
+
+```{r}
+ggplot(data  = amber_brom,
+       aes(x = npi_mean,
+           y = ggc_mean,
+           col = sex,
+           group = sex))+
+  geom_point(size = 1.2,
+             alpha = .8,
+             position = "jitter")+# to add some random noise for plotting purposes
+  geom_smooth(method = lm,
+              # se     = FALSE,
+              # col    = "black",
+              size   = .5,
+              alpha  = .8)+ # to add regression line
+  theme_minimal()+
+  labs(title = "NPI narcissism vs. Group conflict",
+       subtitle = "add regression line")
+```
+
+
+#### Scatter with regression lines coloured by team
+
+##### NPI
+
+```{r}
+ggplot(data  = amber_brom,
+       aes(x = npi_mean,
+           y = ggc_mean,
+           col = as.numeric(team),
+           group = team)) +
+  geom_point(size = 1.2,
+             alpha = .8,
+             position = "jitter") +# to add some random noise for plotting purposes
+  theme_minimal() +
+  theme(legend.position = "none") +
+  scale_color_gradientn(colours = rainbow(59)) +
+  geom_smooth(method = lm,
+              se     = FALSE,
+              size   = .5,
+              alpha  = .8) + # to add regression line
+  labs(title = "NPI narcissism vs. Group goal commitment",
+       subtitle = "add colours and regression lines for different teams")
+```
+
+
+##### CNI
+
+```{r}
+ggplot(data  = amber_brom,
+       aes(x = cni_mean,
+           y = ggc_mean,
+           col = as.numeric(team),
+           group = team)) +
+  geom_point(size = 1.2,
+             alpha = .8,
+             position = "jitter") +# to add some random noise for plotting purposes
+  theme_minimal() +
+  theme(legend.position = "none") +
+  scale_color_gradientn(colours = rainbow(59)) +
+  geom_smooth(method = lm,
+              se     = FALSE,
+              size   = .5,
+              alpha  = .8) + # to add regression line
+  labs(title = "CNI narcissism vs. Group goal commitment",
+       subtitle = "add colours and regression lines for different teams")
+```
+
+
+### Analysis 1 {.tabset}
+#### Intercept only model
+
+```{r, include=FALSE}
+ggc_interceptonlymodel <- 
+  brm(ggc_mean ~ 1 + (1|team),  
+      data = na.omit(select(amber_brom_centered, ggc_mean,
+                            team_npi, team_cni, team, npi_mean, cni_mean,)), 
+      warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+ggc_interceptonlyparams <- modelParams(ggc_interceptonlymodel)
+
+# Calculating ICC
+hyp <- "sd_team__Intercept^2 / (sd_team__Intercept^2 + sigma^2) = 0"
+icc_test <- print(hypothesis(ggc_interceptonlymodel, hyp, class = NULL))
+icc_est <- paste0(icc_test$hypothesis$Estimate, " [", icc_test$hypothesis$CI.Lower, ",",
+       icc_test$hypothesis$CI.Upper, "]")
+```
+
+
+```{r}
+ggc_interceptonlyparams %>% 
+  kable(digits = 2)
+```
+
+* Posterior mean of residual variance at team level = `r ggc_interceptonlyparams[2,2]^2`
+* Posterior mean of residual variance at individual level = `r ggc_interceptonlyparams[3,2]^2`
+* ICC: $\rho$ = `r icc_est`
+
+
+#### First level predictors no interaction
+
+```{r, m0-est, interval=FALSE}
+ggc_model0 <- brm(ggc_mean ~ 1 + sex + npi_mean + cni_mean + (1|team),  
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+ggc_model0params <- modelParams(ggc_model0)
+```
+
+```{r, m0-print}
+ggc_model0params %>% 
+  kable(digits = 2)
+```
+
+* Fixed regression slopes are not different to 0
+* Residual variance on the team level is small: $\sigma_{u0}$ = `r ggc_model0params[6,2]^2`)
+
+
+
+#### First level predictors
+
+```{r, interval=FALSE}
+ggc_model1 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + (1|team),  
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+ggc_model1params <- modelParams(ggc_model1)
+```
+
+```{r}
+ggc_model1params %>% 
+  kable(digits = 2)
+```
+
+* Fixed regression slopes are not different to 0
+* Residual variance on the team level is small: $\sigma_{u0}$ = `r ggc_model1params[6,2]^2`)
+
+
+#### First and second level predictors
+
+```{r, include=FALSE}
+ggc_model2 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + 
+                team_npi + team_cni + (1|team),
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE)
+
+ggc_model2params <- modelParams(ggc_model2)
+
+ggc_L1R2 <- 
+  # Because the variables have been centred on the group means, the sigma^2 is
+    # a biased estimator. Snijders & Bosker (2012) suggest incorporating the 
+    # variance of the intercept to use the within-group variance in a consistent
+    # way
+  ((ggc_interceptonlyparams[3,2]^2 + ggc_interceptonlyparams[2,2]^2) - 
+  (ggc_model2params[9,2]^2 + ggc_model2params[8,2]^2)) / 
+  (ggc_interceptonlyparams[3,2]^2 + ggc_interceptonlyparams[2,2]^2)
+
+# Muthen (1994) ad hoc estimator to replace n in Snijders & Boskers's (1994)
+  # fix for L2 R2 estimate
+grp_sizes <- 
+  amber_brom_centered %>% 
+  group_by(team) %>% 
+  summarise(n = n(),
+            nsq = n()^2)
+
+c <- (nrow(amber_brom_centered)^2 - sum(grp_sizes$nsq)) / 
+  (nrow(amber_brom_centered) * length(unique(amber_brom_centered$team)) - 1)
+
+ggc_L2R2 <- ((ggc_interceptonlyparams[2,2]^2 + ggc_interceptonlyparams[3,2]^2/c) - 
+           (ggc_model2params[8,2]^2 + ggc_model2params[9,2]^2/c)) / 
+  (ggc_interceptonlyparams[2,2]^2 + ggc_interceptonlyparams[3,2]^2/c)
+  
+```
+
+```{r}
+ggc_model2params %>% 
+  kable(digits = 2)
+```
+
+* sexMale is greater than 0 
+* team_npi is less than 0
+* Residual variance on the team level is small: $\sigma_{u0}$ = `r ggc_model2params[8,2]^2`)
+* L1 $R^2$ = `r ggc_L1R2`
+* L2 $R^2$ = `r ggc_L2R2`
+
+#### First and second level predictors with random slopes
+
+```{r, include=FALSE}
+ggc_model3 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + 
+                team_npi + team_cni + 
+                (1 + sex + npi_mean*cni_mean + team_npi + team_cni|team),
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE)
+
+ggc_model3params <- modelParams(ggc_model3)
+```
+
+
+```{r}
+ggc_model3params %>% 
+  kable(digits = 2)
+
+broom.mixed::tidy(ggc_model3)
+```
+
+* sexMale is greater than zero
+* team_npi is less than 0
+* all random slopes variances, except `team_cni`, are greater than zero
+  * remove random slope for `team_cni`
+  
+```{r, include=FALSE}
+ggc_model4 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + 
+                team_npi + team_cni + 
+                (1 + sex + npi_mean*cni_mean + team_npi |team),
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE)
+
+ggc_model4params <- modelParams(ggc_model4)
+```
+
+
+```{r}
+ggc_model4params %>% 
+  kable(digits = 2)
+```
+
+* random slope for `cni_mean` not different to zero but random slope for npi_mean:cni_mean is, therefore retain
+
+#### First and second level predictors without interaction and with random slopes
+
+```{r, include=FALSE}
+ggc_model3.1 <- brm(ggc_mean ~ 1 + sex + npi_mean + cni_mean + 
+                team_npi + team_cni + 
+                (1 + sex + npi_mean + cni_mean + team_npi + team_cni|team),
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE)
+
+ggc_model3.1params <- modelParams(ggc_model3.1)
+```
+
+
+```{r}
+ggc_model3.1params %>% 
+  kable(digits = 2)
+
+broom.mixed::tidy(ggc_model3.1)
+```
+
+
+#### First and second level predictors with random slopes and cross-level interaction
+
+```{r, include=FALSE}
+ggc_model5 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + 
+                team_npi + team_cni +
+                team_npi*team_cni:npi_mean*cni_mean +
+                (1 + sex + npi_mean*cni_mean + team_npi|team),
+              data = amber_brom_centered, 
+              warmup = 3000, iter = 8000, save_all_pars = TRUE,
+              seed = 123, control = list(adapt_delta = 0.99))
+
+ggc_model5params <- modelParams(ggc_model5)
+```
+
+
+```{r}
+ggc_model5params %>% 
+  kable(digits = 2)
+
+conditional_effects(ggc_model5)
+
+```
+
+* The estimate for the intercept is 0.65[-0.68;2.00] NS
+* The estimate for the fixed effect of sex (Male) is 0.31[0.05;0.57]
+
+
+#### First and second level predictors with random slopes and full cross-level interaction
+
+```{r, include=FALSE}
+ggc_model6 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + 
+                team_npi + team_cni +
+                team_npi*team_cni*npi_mean*cni_mean +
+                (1 + sex + npi_mean*cni_mean + team_cni*team_npi|team),
+              data = amber_brom_centered, 
+              warmup = 3000, iter = 8000, save_all_pars = TRUE,
+              seed = 123, control = list(adapt_delta = 0.99))
+
+ggc_model6params <- modelParams(ggc_model6)
+```
+
+
+```{r}
+ggc_model6params %>% 
+  kable(digits = 2)
+
+conditional_effects(ggc_model6)
+```
+
+### Model comparison 1
+
+```{r}
+ggc_interceptestimates <- 
+  ggc_interceptonlyparams %>% 
+  transmute(Parameter = Parameter,
+            `Intercept only` = bayesEstimate(.))
+ggc_model1estimates <- 
+  ggc_model1params %>% 
+  transmute(Parameter = Parameter,
+            `L1 predictors` = bayesEstimate(.))
+ggc_model2estimates <- 
+  ggc_model2params %>% 
+  transmute(Parameter = Parameter,
+            `L2 predictors` = bayesEstimate(.))
+ggc_model3estimates <- 
+  ggc_model3params %>% 
+  transmute(Parameter = Parameter,
+            `L2 predictors and random slopes 1` = bayesEstimate(.))
+ggc_model3.1estimates <- 
+  ggc_model3.1params %>% 
+  transmute(Parameter = Parameter,
+            `L2 predictors and random slopes 1 no interaction` = bayesEstimate(.))
+ggc_model4estimates <- 
+  ggc_model4params %>% 
+  transmute(Parameter = Parameter,
+            `L2 predictors and random slopes 2` = bayesEstimate(.))
+ggc_model5estimates <- 
+  ggc_model5params %>% 
+  transmute(Parameter = Parameter,
+            `L2 predictors and random slopes 2 with cross level interaction` = bayesEstimate(.))
+
+full_join(x = tibble(Parameter = ggc_model5estimates$Parameter), 
+          y = ggc_interceptestimates, by = "Parameter") %>% 
+  full_join(ggc_model1estimates, 
+            by = "Parameter", suffix = c(".I", ".1")) %>% 
+  full_join(ggc_model2estimates, 
+            by = "Parameter", suffix = c("", ".2")) %>% 
+  full_join(ggc_model3estimates, 
+            by = "Parameter", suffix = c("", ".3")) %>% 
+  full_join(ggc_model3.1estimates, 
+            by = "Parameter", suffix = c("", ".3.1")) %>% 
+  full_join(ggc_model4estimates, 
+            by = "Parameter", suffix = c("", ".4")) %>% 
+  # full_join(ggc_model4.1estimates, 
+  #           by = "Parameter", suffix = c("", ".4.1")) %>% 
+  full_join(ggc_model5estimates, 
+            by = "Parameter", suffix = c("", ".5")) %>% 
+  select(-c(starts_with("Est.Error"))) %>%
+  filter(!Parameter == "lp__" &
+           str_detect(Parameter, "z_") == FALSE &
+           str_detect(Parameter, "r_") == FALSE &
+           str_detect(Parameter, "L_") == FALSE) %>% 
+  kable(align = "r")
+
+# full_join(
+#   x = full_join(
+#     x = full_join(x = tibble(Parameter = ggc_model5estimates$Parameter), 
+#                   y = ggc_interceptestimates, by = "Parameter"), 
+#     y = ggc_model1estimates, 
+#     by = "Parameter", suffix = c(".I", ".1")),
+#   y = full_join(ggc_model2estimates, ggc_model3estimates, by = "Parameter", suffix = c(".2", ".3"))) %>%  
+#   full_join(full_join(ggc_model4estimates, ggc_model5estimates, by = "Parameter", suffix = c(".4", ".5")),
+#             by = "Parameter") 
+```
+
+
+```{r, message = FALSE}
+crit <- c('loo', 'waic', 'kfold', 'loo_subsample', 'bayes_R2', 'loo_R2', 'marglik')
+ggc_interceptonlymodel <- add_criterion(ggc_interceptonlymodel, crit)
+ggc_model1 <- add_criterion(ggc_model1, crit)
+ggc_model2 <- add_criterion(ggc_model2, crit)
+ggc_model3 <- add_criterion(ggc_model3, crit)
+ggc_model4 <- add_criterion(ggc_model4, crit)
+ggc_model5 <- add_criterion(ggc_model5, crit)
+
+ggc_loo1 <- loo(ggc_interceptonlymodel)
+ggc_loo2 <- loo(ggc_model1)
+ggc_loo3 <- loo(ggc_model2)
+ggc_loo4 <- loo(ggc_model3)
+ggc_loo5 <- loo(ggc_model4)
+ggc_loo6 <- loo(ggc_model5)
+ggc_loo7 <- loo_compare(ggc_interceptonlymodel, ggc_model1, ggc_model2, ggc_model3, 
+                ggc_model4, ggc_model5, criterion = "loo")
+
+ggc_loo7
+
+print(mean(ggc_model3$criteria$bayes_R2))
+print(mean(ggc_model5$criteria$bayes_R2))
+```
+
+
+
+### Analysis 2 {.tabset}
+#### Intercept only model
+
+```{r, include=FALSE}
+ggc2_interceptonlymodel <- 
+  brm(ggc_mean ~ 1 + (1|team),  
+      data = na.omit(select(amber_brom_centered, ggc_mean,
+                            team_npi, team_cni, team, npi_mean, cni_mean,)), 
+      warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+ggc2_interceptonlyparams <- modelParams(ggc2_interceptonlymodel)
+
+# Calculating ICC
+hyp <- "sd_team__Intercept^2 / (sd_team__Intercept^2 + sigma^2) = 0"
+icc_test <- print(hypothesis(ggc2_interceptonlymodel, hyp, class = NULL))
+icc_est <- paste0(icc_test$hypothesis$Estimate, " [", icc_test$hypothesis$CI.Lower, ",",
+       icc_test$hypothesis$CI.Upper, "]")
+```
+
+
+```{r}
+ggc2_interceptonlyparams %>% 
+  kable(digits = 2)
+```
+
+* Posterior mean of residual variance at team level = `r ggc2_interceptonlyparams[2,2]^2`
+* Posterior mean of residual variance at individual level = `r ggc2_interceptonlyparams[3,2]^2`
+* ICC: $\rho$ = `r icc_est`
+
+
+#### First level predictors
+
+```{r, interval=FALSE}
+ggc2_model1 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + (1|team),  
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+ggc2_model1params <- modelParams(ggc2_model1)
+```
+
+```{r}
+ggc2_model1params %>% 
+  kable(digits = 2)
+```
+
+* Fixed regression slopes are not different to 0
+* Residual variance on the team level is small: $\sigma_{u0}$ = `r ggc2_model1params[6,2]^2`)
+
+
+#### First and second level predictors
+
+```{r, include=FALSE}
+ggc2_model2 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + 
+                     team_npi + team_cni + sd_npi + sd_cni + (1|team),
+                   data = amber_brom_centered, 
+                   warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE)
+
+ggc2_model2params <- modelParams(ggc2_model2)
+
+ggc2_L1R2 <- 
+  # Because the variables have been centred on the group means, the sigma^2 is
+    # a biased estimator. Snijders & Bosker (2012) suggest incorporating the 
+    # variance of the intercept to use the within-group variance in a consistent
+    # way
+  ((ggc2_interceptonlyparams[3,2]^2 + ggc2_interceptonlyparams[2,2]^2) - 
+  (ggc2_model2params[9,2]^2 + ggc2_model2params[8,2]^2)) / 
+  (ggc2_interceptonlyparams[3,2]^2 + ggc2_interceptonlyparams[2,2]^2)
+
+# Muthen (1994) ad hoc estimator to replace n in Snijders & Boskers's (1994)
+  # fix for L2 R2 estimate
+grp_sizes <- 
+  amber_brom_centered %>% 
+  group_by(team) %>% 
+  summarise(n = n(),
+            nsq = n()^2)
+
+c <- (nrow(amber_brom_centered)^2 - sum(grp_sizes$nsq)) / 
+  (nrow(amber_brom_centered) * length(unique(amber_brom_centered$team)) - 1)
+
+ggc2_L2R2 <- ((ggc2_interceptonlyparams[2,2]^2 + ggc2_interceptonlyparams[3,2]^2/c) - 
+           (ggc2_model2params[8,2]^2 + ggc2_model2params[9,2]^2/c)) / 
+  (ggc2_interceptonlyparams[2,2]^2 + ggc2_interceptonlyparams[3,2]^2/c)
+  
+```
+
+```{r}
+ggc2_model2params %>% 
+  kable(digits = 2)
+```
+
+* sexMale is greater than 0 
+* team_npi is less than 0
+* Residual variance on the team level is small: $\sigma_{u0}$ = `r ggc2_model2params[8,2]^2`)
+* L1 $R^2$ = `r ggc2_L1R2`
+* L2 $R^2$ = `r ggc2_L2R2`
+
+#### First and second level predictors with random slopes
+
+```{r, include=FALSE}
+ggc2_model3 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + 
+                     team_npi + team_cni + sd_npi + sd_cni +
+                     (1 + sex + npi_mean*cni_mean + 
+                        team_npi + team_cni + sd_npi + sd_cni|team),
+                   data = amber_brom_centered, 
+                   control = list(adapt_delta = 0.99),
+                   warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE)
+
+ggc2_model3params <- modelParams(ggc2_model3)
+```
+
+
+```{r}
+ggc2_model3params %>% 
+  kable(digits = 2)
+
+broom.mixed::tidy(ggc2_model3)
+```
+
+* sexMale is greater than zero
+* team_npi is less than 0
+* all random slopes variances, except `team_cni`, are greater than zero
+  * remove random slope for `team_cni`
+  
+```{r, include=FALSE}
+ggc2_model4 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + 
+                team_npi + team_cni + 
+                (1 + sex + npi_mean*cni_mean + team_npi |team),
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE)
+
+ggc2_model4params <- modelParams(ggc2_model4)
+```
+
+
+```{r}
+ggc2_model4params %>% 
+  kable(digits = 2)
+```
+
+* random slope for `cni_mean` not different to zero but random slope for npi_mean:cni_mean is, therefore retain
+
+
+#### First and second level predictors with random slopes and cross-level interaction
+
+```{r, include=FALSE}
+ggc2_model5 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + 
+                team_npi + team_cni +
+                team_npi*team_cni:npi_mean*cni_mean +
+                  sd_npi*(npi_mean*cni_mean) + sd_cni*(npi_mean*cni_mean)
+                (1 + sex + npi_mean*cni_mean + team_cni + team_npi|team),
+              data = amber_brom_centered, 
+              warmup = 3000, iter = 8000, save_all_pars = TRUE,
+              seed = 123, control = list(adapt_delta = 0.99))
+
+ggc2_model5params <- modelParams(ggc2_model5)
+```
+
+
+```{r}
+ggc2_model5params %>% 
+  kable(digits = 2)
+
+conditional_effects(ggc2_model5)
+
+```
+
+* The estimate for the intercept is 0.65[-0.68;2.00] NS
+* The estimate for the fixed effect of sex (Male) is 0.31[0.05;0.57]
+
+
+#### First and second level predictors with random slopes and full cross-level interaction
+
+```{r, include=FALSE}
+ggc2_model6 <- brm(ggc_mean ~ 1 + sex + npi_mean*cni_mean + 
+                team_npi + team_cni +
+                team_npi*team_cni*npi_mean*cni_mean*sd_npi*sd_cni +
+                (1 + sex + npi_mean*cni_mean + team_cni*team_npi + 
+                   sd_npi + sd_cni|team),
+              data = amber_brom_centered, 
+              warmup = 3000, iter = 8000, save_pars = save_pars(all = TRUE),
+              seed = 123, control = list(adapt_delta = 0.99))
+
+ggc2_model6params <- modelParams(ggc2_model6)
+```
+
+
+```{r}
+ggc2_model6params %>% 
+  kable(digits = 2)
+
+conditional_effects(ggc2_model6)
+```
+
+### Model comparison 2
+
+```{r}
+ggc2_interceptestimates <- 
+  ggc2_interceptonlyparams %>% 
+  transmute(Parameter = Parameter,
+            `Intercept only` = bayesEstimate(.))
+ggc2_model1estimates <- 
+  ggc2_model1params %>% 
+  transmute(Parameter = Parameter,
+            `L1 predictors` = bayesEstimate(.))
+ggc2_model2estimates <- 
+  ggc2_model2params %>% 
+  transmute(Parameter = Parameter,
+            `L2 predictors` = bayesEstimate(.))
+ggc2_model3estimates <- 
+  ggc2_model3params %>% 
+  transmute(Parameter = Parameter,
+            `L2 predictors and random slopes 1` = bayesEstimate(.))
+ggc2_model4estimates <- 
+  ggc2_model4params %>% 
+  transmute(Parameter = Parameter,
+            `L2 predictors and random slopes 2` = bayesEstimate(.))
+ggc2_model5estimates <- 
+  ggc2_model5params %>% 
+  transmute(Parameter = Parameter,
+            `L2 predictors and random slopes 2 with cross level interaction` = bayesEstimate(.))
+
+full_join(full_join(full_join(x = tibble(Parameter = ggc2_model5estimates$Parameter), 
+                      y = ggc2_interceptestimates, by = "Parameter"), ggc2_model1estimates, 
+                    by = "Parameter", suffix = c(".I", ".1")),
+  full_join(ggc2_model2estimates, ggc2_model3estimates, by = "Parameter", suffix = c(".2", ".3"))) %>%  
+  full_join(full_join(ggc2_model4estimates, ggc2_model5estimates, by = "Parameter", suffix = c(".4", ".5")),
+    by = "Parameter") %>% 
+  select(-c(starts_with("Est.Error"))) %>%
+  filter(!Parameter == "lp__" &
+           str_detect(Parameter, "z_") == FALSE &
+           str_detect(Parameter, "r_") == FALSE &
+           str_detect(Parameter, "L_") == FALSE) %>% 
+  kable(align = "r")
+```
+
+
+```{r, message = FALSE}
+crit <- c('loo', 'waic', 'kfold', 'loo_subsample', 'bayes_R2', 'loo_R2', 'marglik')
+ggc2_interceptonlymodel <- add_criterion(ggc2_interceptonlymodel, crit)
+ggc2_model1 <- add_criterion(ggc2_model1, crit)
+ggc2_model2 <- add_criterion(ggc2_model2, crit)
+ggc2_model3 <- add_criterion(ggc2_model3, crit)
+ggc2_model4 <- add_criterion(ggc2_model4, crit)
+ggc2_model5 <- add_criterion(ggc2_model5, crit)
+
+ggc2_loo1 <- loo(ggc2_interceptonlymodel)
+ggc2_loo2 <- loo(ggc2_model1)
+ggc2_loo3 <- loo(ggc2_model2)
+ggc2_loo4 <- loo(ggc2_model3)
+ggc2_loo5 <- loo(ggc2_model4)
+ggc2_loo6 <- loo(ggc2_model5)
+ggc2_loo7 <- loo_compare(ggc2_interceptonlymodel, ggc2_model1, ggc2_model2, ggc2_model3, 
+                ggc2_model4, ggc2_model5, criterion = "loo")
+
+ggc2_loo7
+
+print(mean(ggc2_model3$criteria$bayes_R2))
+print(mean(ggc2_model5$criteria$bayes_R2))
+```
+
+
+
+## IGC multivariate {.tabset}
+
+### Plotting
+
+```{r, eval=TRUE}
+plotSlopes <- function(data, resp, efflist, group) {
+  require(ggplot2)
+  require(purrr)
+  y <- enquo(resp)
+  group <- enquo(group)
+  ngroups <- data %>% 
+    select(!!group) %>% 
+    unique() %>% 
+    nrow()
+
+  map(efflist, function(x)
+    ggplot(data, aes(!!sym(x), !!y, col = as.numeric(!!group), 
+                     group = !!group)) +
+    geom_point(size = 1.2,
+               alpha = .8,
+               position = "jitter") + # to add some random noise for plotting purposes
+    theme_minimal() +
+    theme(legend.position = "none") +
+    scale_color_gradientn(colours = rainbow(n = ngroups)) +
+    geom_smooth(method = lm,
+                se     = FALSE,
+                size   = .5,
+                alpha  = .8) + # to add regression line
+    ylab(NULL)
+  )
+}
+```
+
+
+#### NPI
+
+```{r}
+plotSlopes(amber_brom, resp = npi_mean, 
+           efflist = c("igc_task", "igc_rel", "igc_proc"),
+           group = team) %>% 
+  gridExtra::grid.arrange(grobs = ., left = "npi_mean")
+```
+
+
+#### CNI
+
+```{r}
+plotSlopes(amber_brom, resp = cni_mean, 
+           efflist = c("igc_task", "igc_rel", "igc_proc"),
+           group = team) %>% 
+  gridExtra::grid.arrange(grobs = ., left = "cni_mean")
+```
+
+
+
+### Analysis {.tabset}
+#### Intercept only model
+
+try `capture.output()`
+
+```{r, include=FALSE}
+igc_interceptonlymodel <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + (1|p|team),  
+                          data = amber_brom_centered, 
+                          warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+# x <- sjstats::tidy_stan(interceptonlymodel, prob = .95)
+# 
+# bind_rows(x$fixed.conditional..igcproc,
+# x$fixed.conditional..igcrel,
+# x$fixed.sigma..igcrel,
+# x$fixed.conditional..igctask,
+# x$fixed.sigma..igctask
+# ) %>% 
+#   pivot_wider(id_cols = Cleaned_Parameter, names_from = Response, values_from = c(Estimate, Std.Error, `HDI(95%)`))
+```
+
+
+```{r}
+igc_interceptonlyparams <- modelParams(igc_interceptonlymodel)
+
+igc_interceptonlyparams %>% 
+  kable(digits = 2)
+```
+
+
+
+#### First level predictors
+
+```{r, include = FALSE}
+igc_model1 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean * cni_mean + (1|p|team), 
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+igc_model1params <- modelParams(igc_model1)
+```
+
+
+```{r}
+igc_model1params %>% 
+  kable(digits = 2)
+```
+
+
+#### First and second level predictors
+
+```{r, include = FALSE}
+igc_model2 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean * cni_mean + team_npi + team_cni + (1|p|team), 
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+igc_model2params <- modelParams(igc_model2)
+```
+
+
+```{r}
+igc_model2params %>% 
+  kable(digits = 2)
+```
+
+
+
+#### First and second level predictors with L1 random slopes
+
+```{r}
+igc_model3 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean * cni_mean + team_npi + team_cni + (1 + 
+                sex + npi_mean * cni_mean|p|team), 
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123, save_all_pars = TRUE) 
+
+igc_model3params <- modelParams(igc_model3)
+```
+
+
+```{r}
+igc_model3params %>% 
+  kable(digits = 2)
+
+conditional_effects(igc_model3)
+```
+
+
+
+
+#### First and level predictors with L1 interaction and L2 random slopes
+
+```{r}
+igc_model4 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean * cni_mean + team_npi + team_cni + (1 + 
+                sex + npi_mean * cni_mean + team_npi + team_cni|p|team), 
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123,
+              control = list(adapt_delta = 0.99), save_all_pars = TRUE) 
+
+igc_model4params <- modelParams(igc_model4)
+```
+
+
+```{r}
+igc_model4params %>% 
+  kable(digits = 2)
+
+conditional_effects(igc_model4)
+```
+
+
+#### First and level predictors with L2 interaction and L2 random slopes
+
+```{r}
+igc_model5 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean*cni_mean + team_npi*team_cni + 
+                (1 + sex + npi_mean*cni_mean + team_npi*team_cni|p|team), 
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123,
+              control = list(adapt_delta = 0.99), save_all_pars = TRUE) 
+
+igc_model5params <- modelParams(igc_model5)
+```
+
+
+```{r}
+igc_model5params %>% 
+  kable(digits = 2)
+
+conditional_effects(igc_model5)
+```
+#### First and level predictors with L2 interaction and L2 random slopes and partial cross level interaction
+
+```{r}
+igc_model6 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean*cni_mean:team_npi*team_cni + 
+                (1 + sex + npi_mean*cni_mean + team_npi*team_cni|p|team), 
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123,
+              control = list(adapt_delta = 0.99), save_all_pars = TRUE) 
+
+igc_model6params <- modelParams(igc_model6)
+```
+
+
+```{r}
+igc_model6params %>% 
+  kable(digits = 2)
+
+conditional_effects(igc_model6)
+```
+
+
+#### First and level predictors with L2 interaction and L2 random slopes and full cross level interaction
+
+```{r}
+igc_model7 <- brm(mvbind(igc_task, igc_rel, igc_proc) ~ 1 + 
+                sex + npi_mean*cni_mean*team_npi*team_cni + 
+                (1 + sex + npi_mean*cni_mean + team_npi*team_cni|p|team), 
+              data = amber_brom_centered, 
+              warmup = 1000, iter = 3000, seed = 123,
+              control = list(adapt_delta = 0.99), save_all_pars = TRUE) 
+
+igc_model7params <- modelParams(igc_model7)
+```
+
+
+```{r}
+igc_model7params %>% 
+  kable(digits = 2)
+
+conditional_effects(igc_model7)
+```
+
+
+
+### Model comparison
+
+```{r}
+igc_interceptestimates <- 
+  igc_interceptonlyparams %>% 
+  transmute(Parameter = Parameter,
+            `Intercept only` = bayesEstimate(.))
+igc_model1estimates <- 
+  igc_model1params %>% 
+  transmute(Parameter = Parameter,
+            `L1 predictors` = bayesEstimate(.))
+igc_model2estimates <-
+  igc_model2params %>% 
+  transmute(Parameter = Parameter,
+            `L2 predictors` = bayesEstimate(.))
+igc_model3estimates <- 
+  igc_model3params %>% 
+  transmute(Parameter = Parameter,
+            `L1 interaction` = bayesEstimate(.))
+igc_model4estimates <- 
+  igc_model4params %>% 
+  transmute(Parameter = Parameter,
+            `L1 interaction L1 random slopes` = bayesEstimate(.))
+igc_model5estimates <- 
+  igc_model5params %>% 
+  transmute(Parameter = Parameter,
+            `L1 interaction L2 random slopes` = bayesEstimate(.))
+
+
+full_join(
+  full_join(
+    full_join(
+      full_join(x = tibble(Parameter = igc_model5estimates$Parameter), 
+                y = igc_interceptestimates, by = "Parameter"), igc_model1estimates, 
+      by = "Parameter", suffix = c(".I", ".1")),
+    full_join(igc_model2estimates, igc_model3estimates, by = "Parameter", 
+              suffix = c(".2", ".3"))),
+  full_join(igc_model4estimates, igc_model5estimates, by = "Parameter", 
+            suffix = c(".4", ".5"))) %>%  
+  select(-c(starts_with("Est.Error"))) %>%
+  filter(!Parameter == "lp__" &
+           str_detect(Parameter, "z_") == FALSE &
+           str_detect(Parameter, "r_") == FALSE &
+           str_detect(Parameter, "L") == FALSE) %>% 
+  kable()
+```

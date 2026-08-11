@@ -1,0 +1,157 @@
+---
+title: "Amber & Brom MSc data combined - LPA"
+author: "Will A. S. Hardy"
+date: "28/01/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidyLPA)
+
+
+knitr::opts_chunk$set(echo = TRUE)
+
+set.seed(32)
+
+amber_brom1 <- 
+  read_rds("../data/amber_brom_msc_merged.rds")
+```
+
+```{r, impute-missing, eval=FALSE}
+amber_brom_imp <- 
+  amber_brom1 %>% 
+  select(-team) %>% 
+  mice::mice(m = 10)
+
+amber_brom_imp$imp$cni_mean
+
+amber_brom_imp %>% 
+  pluck("imp")
+```
+
+
+```{r}
+lpa_data <- 
+  amber_brom1 %>% 
+  select(npi_mean, cni_mean, 
+         sex) %>% 
+  mutate(sex = as.numeric(sex)) %>% 
+  mousetrap::scale_within(within = "sex") %>% 
+  select(-sex)
+
+lpa_models <- 
+  lpa_data %>% 
+  estimate_profiles(df = ., n_profiles = 1:5, models = c(1:3))
+
+
+lpa_models %>% 
+  plot_profiles(rawdata = FALSE, sd = FALSE)
+
+lpa_fits <- (compare_solutions(lpa_models, 
+                               statistics = c("BIC", "AIC", "SABIC", "BLRT_p")))
+lpa_fits %>% 
+  map(as_tibble) %>% 
+  pluck("fits") %>% 
+  filter(is.na(Warnings) & BLRT_p < .05) %>% 
+  arrange(BIC, AIC, )
+
+lpa_data %>% 
+  estimate_profiles(df = ., 
+                    n_profiles = 2, 
+                    models = 6) %>%
+  plot_profiles(rawdata = FALSE, sd = FALSE)
+
+best_model <- 
+  list(ahp = lpa_data %>% 
+  estimate_profiles(df = ., 
+                    n_profiles = unlist(lpa_fits$fits[lpa_fits$AHP,2]), 
+                    models = unlist(lpa_fits$fits[lpa_fits$AHP,1])),
+  bic = lpa_data %>% 
+  estimate_profiles(df = ., 
+                    n_profiles = 5, 
+                    models = 2))
+
+best_model$ahp %>%
+  plot_profiles(rawdata = FALSE, sd = FALSE)
+# best_model$bic %>%
+#   plot_profiles(rawdata = FALSE, sd = FALSE)
+
+```
+
+```{r}
+lpa_data <- 
+  amber_brom1 %>% 
+  select(npi_mean, cni_mean) %>% 
+  mutate(npi_mean = (6*npi_mean) + 1)
+
+lpa_models <- 
+  lpa_data %>% 
+  estimate_profiles(df = ., n_profiles = 1:5, models = c(1:3))
+
+
+lpa_models %>% 
+  plot_profiles(rawdata = FALSE, sd = FALSE)
+
+lpa_fits <- (compare_solutions(lpa_models, 
+                               statistics = c("BIC", "AIC", "SABIC", "BLRT_p")))
+lpa_fits %>% 
+  map(as_tibble) %>% 
+  pluck("fits") %>% 
+  filter(is.na(Warnings) & BLRT_p < .05) %>% 
+  arrange(BIC, AIC, )
+
+lpa_data %>% 
+  estimate_profiles(df = ., 
+                    n_profiles = 2, 
+                    models = 6) %>%
+  plot_profiles(rawdata = FALSE, sd = FALSE)
+
+best_model <- 
+  list(ahp = lpa_data %>% 
+  estimate_profiles(df = ., 
+                    n_profiles = unlist(lpa_fits$fits[lpa_fits$AHP,2]), 
+                    models = unlist(lpa_fits$fits[lpa_fits$AHP,1])),
+  bic = lpa_data %>% 
+  estimate_profiles(df = ., 
+                    n_profiles = 4, 
+                    models = 2))
+
+best_model$ahp %>%
+  plot_profiles(rawdata = FALSE, sd = FALSE)
+best_model$bic %>%
+  plot_profiles(rawdata = FALSE, sd = FALSE)
+
+best_model$ahp$model_2_class_4$model$classification %>% table
+amber_brom1$cni_mean %>% mean(na.rm = TRUE)
+```
+
+```{r, ahp-based-log-reg}
+log_reg_data <- 
+  amber_brom1 %>% 
+  filter(!is.na(npi_mean) &
+           !is.na(cni_mean)) %>% 
+  bind_cols(data.frame(class = as.factor(best_model$ahp$model_2_class_4$model$classification)))
+
+m1 <- lm(ggc_mean ~ factor(class, levels = c(4,1,2,3), ordered = T), data = log_reg_data)
+broom::glance(m1)
+summary(m1)
+
+aov_1 <- aov(ggc_mean ~ factor(class), data = log_reg_data) 
+summary(aov_1)
+
+TukeyHSD(aov_1)
+```
+
+
+```{r}
+amber_brom1 %>% 
+  select(npi_mean, cni_mean) %>% 
+  ggplot(aes(x = npi_mean, y = cni_mean)) +
+  geom_point() +
+  geom_smooth(method = "lm") + 
+  geom_density_2d()
+
+cor.test(amber_brom1$npi_mean, amber_brom1$cni_mean)
+```
+
